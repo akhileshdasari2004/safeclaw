@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Local agent / IDE config (may contain API keys)
+agents.config.json
+.nanocoder/
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Next.js
+apps/frontend/.next/
+apps/frontend/out/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Secrets
+*.pem
+*.key
+!infrastructure/scripts/*.example
+
+# Test
+playwright-report/
+test-results/

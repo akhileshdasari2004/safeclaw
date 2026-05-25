@@ -1,0 +1,17 @@
+{
+  "nanocoder": {
+    "providers": [
+      {
+        "name": "Ollama",
+        "models": ["llama3:latest"],
+        "baseUrl": "http://localhost:11434/v1"
+      },
+      {
+        "name": "OpenAI",
+        "models": ["gpt-4.1"],
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "YOUR_OPENAI_API_KEY"
+      }
+    ]
+  }
+}

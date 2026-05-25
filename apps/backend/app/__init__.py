@@ -1,0 +1,1 @@
+"""SafeClaw FastAPI application."""
