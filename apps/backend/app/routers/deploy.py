@@ -1,4 +1,3 @@
-import asyncio
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -106,7 +105,7 @@ async def create_deployment(
         region=body.region,
         server_name=body.server_name,
         plan_id=body.plan_id,
-        status="pending",
+        status="queued",
         idempotency_key=body.idempotency_key,
         logs=f"SSH_PUBLIC_KEY:{body.ssh_public_key}\n",
     )
@@ -142,7 +141,7 @@ async def create_deployment(
             except Exception:
                 await session.rollback()
 
-    background_tasks.add_task(lambda: asyncio.run(_provision_task()))
+    background_tasks.add_task(_provision_task)
     return deployment
 
 
@@ -160,10 +159,10 @@ async def retry_deployment(
     dep = result.scalar_one_or_none()
     if not dep:
         raise HTTPException(status_code=404, detail="Deployment not found")
-    if dep.status not in ("failed", "pending"):
+    if dep.status not in ("failed", "pending", "queued"):
         raise HTTPException(status_code=400, detail="Only failed deployments can be retried")
 
-    dep.status = "pending"
+    dep.status = "queued"
     dep.error_message = None
 
     async def _retry() -> None:
@@ -180,5 +179,5 @@ async def retry_deployment(
             except Exception:
                 await session.rollback()
 
-    background_tasks.add_task(lambda: asyncio.run(_retry()))
+    background_tasks.add_task(_retry)
     return dep

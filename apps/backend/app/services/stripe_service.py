@@ -22,6 +22,15 @@ from app.utils.security import generate_license_key, hash_password
 logger = get_logger(__name__)
 
 
+def create_portal_session(stripe_customer_id: str) -> stripe.billing_portal.Session:
+    settings = get_settings()
+    stripe.api_key = settings.stripe_secret_key
+    return stripe.billing_portal.Session.create(
+        customer=stripe_customer_id,
+        return_url=settings.stripe_success_url.replace("checkout=success", "billing=1"),
+    )
+
+
 def create_checkout_session(email: str, tier: str) -> stripe.checkout.Session:
     settings = get_settings()
     stripe.api_key = settings.stripe_secret_key

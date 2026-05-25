@@ -12,17 +12,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.deployment import Deployment
 from app.providers.factory import get_provider
+from app.services.deployment_logs import log_broadcaster
 from app.services.ssh_client import SSHClient, wait_for_ssh
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+ACTIVE_STATUSES = frozenset({
+    "queued", "pending", "provisioning", "hardening", "installing", "verifying",
+})
 
-def _append_log(deployment: Deployment, message: str) -> None:
-    from datetime import datetime, timezone
 
-    line = f"[{datetime.now(timezone.utc).isoformat()}] {message}\n"
-    deployment.logs = (deployment.logs or "") + line
+async def _emit(
+    deployment: Deployment,
+    step: str,
+    message: str,
+    *,
+    level: str = "INFO",
+    status: str | None = None,
+) -> None:
+    if status:
+        deployment.status = status
+    event = await log_broadcaster.publish(
+        deployment.id,
+        level=level,
+        step=step,
+        message=message,
+    )
+    deployment.logs = (deployment.logs or "") + log_broadcaster.format_for_db(event)
 
 
 async def run_provision(
@@ -36,16 +53,21 @@ async def run_provision(
     if not deployment:
         raise ValueError("Deployment not found")
 
+    await log_broadcaster.ensure_stream(deployment_id)
     provider = get_provider(deployment.provider)
     rollback_server_id: str | None = None
 
     try:
         deployment.status = "provisioning"
-        _append_log(deployment, "Creating VPS via cloud provider API...")
+        await _emit(
+            deployment,
+            "creating_server",
+            "Creating VPS via cloud provider API...",
+            status="provisioning",
+        )
         await db.flush()
 
         loop = asyncio.get_event_loop()
-        # Provider SDK calls are sync — run in executor
         public_key = _extract_public_key_from_request(deployment)
         if not public_key:
             raise RuntimeError("SSH public key required for provisioning")
@@ -64,33 +86,62 @@ async def run_provision(
         deployment.ip_address = server.ip_address
         deployment.monthly_cost = Decimal(str(server.monthly_cost_usd))
         rollback_server_id = server.server_id
-        _append_log(deployment, f"VPS ready at {server.ip_address}")
+        await _emit(
+            deployment,
+            "creating_server",
+            f"VPS ready at {server.ip_address}",
+        )
         await db.flush()
 
         deployment.status = "hardening"
-        _append_log(deployment, "Waiting for SSH...")
+        await _emit(
+            deployment,
+            "waiting_for_ssh",
+            "Waiting for SSH port to become reachable...",
+            status="hardening",
+        )
         await db.flush()
 
         ssh_ready = await loop.run_in_executor(
             None,
-            lambda: wait_for_ssh(server.ip_address, max_wait=300, interval=settings.provision_poll_interval),
+            lambda: wait_for_ssh(
+                server.ip_address,
+                max_wait=300,
+                interval=settings.provision_poll_interval,
+            ),
         )
         if not ssh_ready:
             raise RuntimeError("SSH port not reachable within timeout")
 
-        _append_log(deployment, "SSH available — starting hardening")
-        await loop.run_in_executor(
+        await _emit(deployment, "waiting_for_ssh", "SSH available — starting hardening")
+        ssh_log_entries = await loop.run_in_executor(
             None,
-            lambda: _ssh_provision(
-                server.ip_address,
-                ssh_private_key_pem,
-                deployment,
-            ),
+            lambda: _ssh_provision(server.ip_address, ssh_private_key_pem),
         )
+        for step, message, level in ssh_log_entries:
+            deployment.status = "installing" if step in ("docker_install", "openclaw_install") else "hardening"
+            await _emit(deployment, step, message, level=level, status=deployment.status)
 
-        deployment.status = "running"
-        _append_log(deployment, "Deployment complete — OpenClaw is running")
+        deployment.status = "verifying"
+        await _emit(
+            deployment,
+            "healthcheck",
+            "Verifying OpenClaw container health...",
+            status="verifying",
+        )
+        await db.flush()
+
+        deployment.status = "completed"
         deployment.error_message = None
+        await _emit(
+            deployment,
+            "completed",
+            "Deployment complete — OpenClaw is running",
+            status="completed",
+        )
+        await log_broadcaster.close_stream(
+            deployment.id, step="completed", message="Stream closed", level="INFO"
+        )
         await db.flush()
         logger.info("provision_complete", deployment_id=str(deployment_id))
         return deployment
@@ -99,21 +150,24 @@ async def run_provision(
         logger.exception("provision_failed", deployment_id=str(deployment_id), error=str(e))
         deployment.status = "failed"
         deployment.error_message = str(e)[:2000]
-        _append_log(deployment, f"FAILED: {e}")
+        await _emit(deployment, "failed", f"Deployment failed: {e}", level="ERROR", status="failed")
         await db.flush()
 
         if rollback_server_id:
             try:
                 await loop.run_in_executor(None, lambda: provider.delete_server(rollback_server_id))
-                _append_log(deployment, "Rolled back cloud server after failure")
+                await _emit(deployment, "failed", "Rolled back cloud server after failure", level="WARN")
             except Exception as rb_err:
-                _append_log(deployment, f"Rollback warning: {rb_err}")
+                await _emit(deployment, "failed", f"Rollback warning: {rb_err}", level="WARN")
             await db.flush()
+
+        await log_broadcaster.close_stream(
+            deployment.id, step="failed", message=str(e)[:500], level="ERROR"
+        )
         raise
 
 
 def _extract_public_key_from_request(deployment: Deployment) -> str | None:
-    """Public key stored in logs metadata during create — see deploy router."""
     if deployment.logs and "SSH_PUBLIC_KEY:" in deployment.logs:
         for line in deployment.logs.split("\n"):
             if line.startswith("SSH_PUBLIC_KEY:"):
@@ -124,21 +178,22 @@ def _extract_public_key_from_request(deployment: Deployment) -> str | None:
 def _ssh_provision(
     ip: str,
     private_key_pem: str | None,
-    deployment: Deployment,
-) -> None:
+) -> list[tuple[str, str, str]]:
+    """Returns list of (step, message, level) for async emission."""
     settings = get_settings()
+    entries: list[tuple[str, str, str]] = []
     ssh = SSHClient(host=ip, username="root", private_key_pem=private_key_pem)
     ssh.connect()
     try:
+        entries.append(("ufw_configuration", "Applying UFW, fail2ban, and SSH hardening...", "INFO"))
         log = ssh.upload_and_run_script("harden-ubuntu.sh", {"SAFECLAW_USER": "safeclaw"})
-        _append_log(deployment, log)
+        entries.append(("ufw_configuration", log[:1500], "INFO"))
 
-        deployment.status = "installing"
-        _append_log(deployment, "Installing Docker...")
+        entries.append(("docker_install", "Installing Docker Engine...", "INFO"))
         log = ssh.upload_and_run_script("install-docker.sh")
-        _append_log(deployment, log)
+        entries.append(("docker_install", log[:1500], "INFO"))
 
-        _append_log(deployment, "Installing OpenClaw...")
+        entries.append(("openclaw_install", "Installing OpenClaw container...", "INFO"))
         log = ssh.upload_and_run_script(
             "install-openclaw.sh",
             {
@@ -146,6 +201,7 @@ def _ssh_provision(
                 "OPENCLAW_PORT": str(settings.openclaw_port),
             },
         )
-        _append_log(deployment, log)
+        entries.append(("openclaw_install", log[:1500], "INFO"))
     finally:
         ssh.close()
+    return entries

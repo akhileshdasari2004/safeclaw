@@ -1,8 +1,9 @@
-"""Security scanner — remote checks over SSH."""
+"""Security scanner — SSH-based checks with weighted scoring."""
 
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 
 from sqlalchemy import select
@@ -16,6 +17,8 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 DANGEROUS_PORTS = {23, 135, 139, 445, 3389, 5900}
+PENALTIES = {"critical": 20, "high": 15, "medium": 10, "low": 5, "info": 2}
+READY_STATUSES = frozenset({"completed", "running"})
 
 
 def _grade(score: int) -> str:
@@ -30,86 +33,163 @@ def _grade(score: int) -> str:
     return "F"
 
 
+def _parse_active(output: str) -> bool:
+    low = output.lower().strip()
+    return low in ("active", "enabled") or "active" in low
+
+
+def _parse_grep_value(output: str, expect_substrings: tuple[str, ...]) -> bool:
+    low = output.lower()
+    return any(s in low for s in expect_substrings)
+
+
 def _run_checks(ip: str, private_key_pem: str | None) -> dict:
-    issues: list[dict] = []
+    findings: list[dict] = []
     score = 100
+
+    def add_finding(severity: str, title: str, description: str, remediation: str) -> None:
+        nonlocal score
+        penalty = PENALTIES.get(severity, 5)
+        score = max(0, score - penalty)
+        findings.append({
+            "severity": severity,
+            "title": title,
+            "description": description,
+            "remediation": remediation,
+        })
 
     ssh = SSHClient(host=ip, username="root", private_key_pem=private_key_pem)
     ssh.connect()
     try:
-        checks = [
-            ("ufw status | grep -i active", "UFW firewall enabled", "critical",
-             "sudo ufw enable && sudo ufw default deny incoming"),
-            ("systemctl is-active fail2ban", "fail2ban active", "high",
-             "sudo systemctl enable --now fail2ban"),
-            ("grep -E '^PermitRootLogin' /etc/ssh/sshd_config.d/99-safeclaw.conf 2>/dev/null || grep PermitRootLogin /etc/ssh/sshd_config",
-             "Root login restricted", "high",
-             "Set PermitRootLogin prohibit-password in /etc/ssh/sshd_config.d/99-safeclaw.conf"),
-            ("grep -E '^PasswordAuthentication no' /etc/ssh/sshd_config.d/99-safeclaw.conf 2>/dev/null",
-             "Password authentication disabled", "critical",
-             "Set PasswordAuthentication no in SSH config"),
-            ("systemctl is-active docker", "Docker running", "medium",
-             "sudo systemctl enable --now docker"),
-            ("test -f /etc/apt/apt.conf.d/20auto-upgrades && grep -q Unattended-Upgrade /etc/apt/apt.conf.d/20auto-upgrades",
-             "Unattended upgrades enabled", "medium",
-             "sudo apt install -y unattended-upgrades"),
+        checks: list[tuple[str, str, str, str, tuple[str, ...] | None]] = [
+            (
+                "ufw status 2>/dev/null | head -5",
+                "UFW firewall disabled",
+                "Uncomplicated Firewall does not appear active.",
+                "critical",
+                ("sudo ufw default deny incoming && sudo ufw enable",),
+            ),
+            (
+                "systemctl is-active fail2ban 2>/dev/null",
+                "fail2ban inactive",
+                "fail2ban service is not running.",
+                "high",
+                ("sudo systemctl enable --now fail2ban",),
+            ),
+            (
+                "grep -hE '^PermitRootLogin' /etc/ssh/sshd_config.d/99-safeclaw.conf /etc/ssh/sshd_config 2>/dev/null | tail -1",
+                "Root login not restricted",
+                "SSH may still allow unrestricted root login.",
+                "high",
+                ("prohibit-password", "no", "without-password"),
+            ),
+            (
+                "grep -hE '^PasswordAuthentication' /etc/ssh/sshd_config.d/99-safeclaw.conf /etc/ssh/sshd_config 2>/dev/null | tail -1",
+                "Password authentication enabled",
+                "SSH password authentication is still enabled.",
+                "critical",
+                ("passwordauthentication no",),
+            ),
+            (
+                "systemctl is-active docker 2>/dev/null",
+                "Docker not running",
+                "Docker daemon is not active.",
+                "medium",
+                ("sudo systemctl enable --now docker",),
+            ),
+            (
+                "test -f /etc/apt/apt.conf.d/20auto-upgrades && grep -qi Unattended-Upgrade /etc/apt/apt.conf.d/20auto-upgrades && echo ok",
+                "Unattended upgrades disabled",
+                "Automatic security updates may not be configured.",
+                "medium",
+                ("ok",),
+            ),
         ]
 
-        for cmd, desc, severity, remediation in checks:
-            code, out, _ = ssh.run(cmd)
-            ok = code == 0 and ("active" in out.lower() or "yes" in out.lower() or "prohibit" in out.lower() or "no" in out.lower())
+        for cmd, title, desc, severity, expect in checks:
+            code, out, err = ssh.run(cmd, timeout=60)
+            ok = code == 0
+            if expect:
+                if "ufw" in cmd:
+                    ok = ok and _parse_active(out)
+                elif "fail2ban" in cmd or "docker" in cmd:
+                    ok = ok and _parse_active(out)
+                elif "PermitRootLogin" in cmd:
+                    ok = ok and _parse_grep_value(out, expect)
+                elif "PasswordAuthentication" in cmd:
+                    ok = ok and _parse_grep_value(out, expect)
+                elif "unattended" in cmd.lower():
+                    ok = ok and "ok" in out.lower()
             if not ok:
-                penalty = {"critical": 20, "high": 15, "medium": 10, "low": 5}.get(severity, 5)
-                score = max(0, score - penalty)
-                issues.append({
-                    "severity": severity,
-                    "description": f"Check failed: {desc}",
-                    "remediation": remediation,
-                })
+                remediation = {
+                    "UFW firewall disabled": "sudo ufw default deny incoming && sudo ufw allow 22/tcp && sudo ufw enable",
+                    "fail2ban inactive": "sudo systemctl enable --now fail2ban",
+                    "Root login not restricted": "echo 'PermitRootLogin prohibit-password' | sudo tee /etc/ssh/sshd_config.d/99-safeclaw.conf && sudo systemctl reload ssh",
+                    "Password authentication enabled": "echo 'PasswordAuthentication no' | sudo tee -a /etc/ssh/sshd_config.d/99-safeclaw.conf && sudo systemctl reload ssh",
+                    "Docker not running": "sudo systemctl enable --now docker",
+                    "Unattended upgrades disabled": "sudo apt-get install -y unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades",
+                }.get(title, err or out or "See SafeClaw hardening docs")
+                add_finding(severity, title, desc, remediation.strip())
 
-        code, out, _ = ssh.run("ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null")
+        code, out, _ = ssh.run("ss -tlnH 2>/dev/null || ss -tln 2>/dev/null || netstat -tln 2>/dev/null", timeout=30)
         if code == 0:
             for port in DANGEROUS_PORTS:
-                if f":{port} " in out or f":{port}\n" in out:
-                    score = max(0, score - 10)
-                    issues.append({
-                        "severity": "high",
-                        "description": f"Dangerous port {port} appears open",
-                        "remediation": f"Close port {port} via firewall: sudo ufw deny {port}/tcp",
-                    })
+                if re.search(rf":{port}\b", out):
+                    add_finding(
+                        "high",
+                        f"Dangerous port {port} exposed",
+                        f"Port {port} appears to be listening.",
+                        f"sudo ufw deny {port}/tcp",
+                    )
 
-        code, out, _ = ssh.run("df -h / | tail -1 | awk '{print $5}' | tr -d '%'")
+        code, out, _ = ssh.run("df -P / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%'", timeout=30)
         if code == 0 and out.strip().isdigit():
             usage = int(out.strip())
             if usage > 90:
-                score = max(0, score - 15)
-                issues.append({
-                    "severity": "high",
-                    "description": f"Disk usage critical: {usage}%",
-                    "remediation": "Free disk space: sudo apt autoremove -y && docker system prune -af",
-                })
+                add_finding(
+                    "high",
+                    "Disk usage critical",
+                    f"Root filesystem is {usage}% full.",
+                    "sudo apt-get autoremove -y && docker system prune -af",
+                )
             elif usage > 80:
-                score = max(0, score - 5)
-                issues.append({
-                    "severity": "medium",
-                    "description": f"Disk usage elevated: {usage}%",
-                    "remediation": "Monitor disk and prune unused Docker images",
-                })
+                add_finding(
+                    "medium",
+                    "Disk usage elevated",
+                    f"Root filesystem is {usage}% full.",
+                    "Monitor disk usage and prune Docker images regularly.",
+                )
 
-        code, out, _ = ssh.run("free | awk '/Mem:/ {printf \"%.0f\", $3/$2 * 100}'")
+        code, out, _ = ssh.run(
+            "awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {if(t>0) printf \"%.0f\", (t-a)/t*100; else print 0}' /proc/meminfo",
+            timeout=30,
+        )
         if code == 0 and out.strip().isdigit():
             mem = int(out.strip())
             if mem > 90:
-                score = max(0, score - 10)
-                issues.append({
-                    "severity": "medium",
-                    "description": f"Memory pressure: {mem}% used",
-                    "remediation": "Restart heavy services or upgrade instance size",
-                })
+                add_finding(
+                    "medium",
+                    "Memory pressure",
+                    f"Estimated memory use is {mem}%.",
+                    "Restart heavy containers or upgrade instance size.",
+                )
     finally:
         ssh.close()
 
-    return {"score": score, "grade": _grade(score), "issues": issues}
+    critical = sum(1 for f in findings if f["severity"] == "critical")
+    high = sum(1 for f in findings if f["severity"] == "high")
+    risk_summary = (
+        f"{len(findings)} finding(s): {critical} critical, {high} high."
+        if findings
+        else "No significant issues detected."
+    )
+
+    return {
+        "score": score,
+        "grade": _grade(score),
+        "findings": findings,
+        "risk_summary": risk_summary,
+    }
 
 
 async def run_scan(
@@ -127,8 +207,8 @@ async def run_scan(
     deployment = result.scalar_one_or_none()
     if not deployment or not deployment.ip_address:
         raise ValueError("Deployment not found or not ready")
-    if deployment.status != "running":
-        raise ValueError("Deployment must be running to scan")
+    if deployment.status not in READY_STATUSES:
+        raise ValueError("Deployment must be completed before scanning")
 
     loop = asyncio.get_event_loop()
     findings = await loop.run_in_executor(

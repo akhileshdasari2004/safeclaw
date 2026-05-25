@@ -1,17 +1,22 @@
 "use client";
 
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DeploymentLogs } from "@/components/deploy/DeploymentLogs";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+
+const ACTIVE = ["queued", "pending", "provisioning", "hardening", "installing", "verifying"];
 
 type Deployment = {
   id: string;
   server_name: string;
   status: string;
   ip_address: string | null;
-  logs: string | null;
   error_message: string | null;
   monthly_cost: number | null;
 };
@@ -20,7 +25,7 @@ type Scan = {
   id: string;
   score: number;
   grade: string;
-  findings: { issues: { severity: string; description: string; remediation: string }[] };
+  created_at: string;
 };
 
 export default function DeploymentDetailPage() {
@@ -31,41 +36,50 @@ export default function DeploymentDetailPage() {
     queryKey: ["deployment", id],
     queryFn: () => api<Deployment>(`/api/v1/deployments/${id}`),
     refetchInterval: (q) =>
-      ["pending", "provisioning", "hardening", "installing"].includes(q.state.data?.status ?? "")
-        ? 3000
-        : false,
+      ACTIVE.includes(q.state.data?.status ?? "") ? 3000 : false,
   });
 
   const { data: scans } = useQuery({
     queryKey: ["scans", id],
     queryFn: () => api<Scan[]>(`/api/v1/scans/deployments/${id}`),
-    enabled: dep?.status === "running",
+    enabled: dep?.status === "completed" || dep?.status === "running",
   });
 
   const scanMutation = useMutation({
-    mutationFn: () =>
-      api<Scan>(`/api/v1/scans/deployments/${id}`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["scans", id] }),
+    mutationFn: () => api<{ id: string }>(`/api/v1/scans/deployments/${id}`, { method: "POST" }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["scans", id] });
+      window.location.href = `/dashboard/scans/${data.id}`;
+    },
   });
 
   const retryMutation = useMutation({
-    mutationFn: () =>
-      api(`/api/v1/deployments/${id}/retry`, { method: "POST" }),
+    mutationFn: () => api(`/api/v1/deployments/${id}/retry`, { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["deployment", id] }),
   });
 
-  if (isLoading) return <p className="p-10 text-muted-foreground">Loading…</p>;
+  if (isLoading) {
+    return (
+      <div className="mx-auto max-w-4xl space-y-4 px-4 py-10">
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    );
+  }
+
+  const isActive = ACTIVE.includes(dep?.status ?? "");
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
       <h1 className="text-2xl font-bold">{dep?.server_name}</h1>
-      <p className="text-muted-foreground">
-        {dep?.status} · {dep?.ip_address ?? "—"}
+      <p className="mt-1 flex flex-wrap items-center gap-2 text-muted-foreground">
+        <Badge variant={dep?.status === "failed" ? "critical" : "info"}>{dep?.status}</Badge>
+        {dep?.ip_address ?? "—"}
         {dep?.monthly_cost != null && ` · ~$${dep.monthly_cost}/mo`}
       </p>
 
       {dep?.status === "failed" && (
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
             Retry deploy
           </Button>
@@ -75,16 +89,11 @@ export default function DeploymentDetailPage() {
         </div>
       )}
 
-      <Card className="mt-8">
-        <CardHeader><CardTitle className="text-base">Provisioning logs</CardTitle></CardHeader>
-        <CardContent>
-          <pre className="max-h-96 overflow-auto rounded bg-muted p-4 text-xs">
-            {dep?.logs || "Waiting for logs…"}
-          </pre>
-        </CardContent>
-      </Card>
+      <div className="mt-8">
+        <DeploymentLogs deploymentId={id!} status={dep?.status} enabled={isActive || dep?.status === "failed"} />
+      </div>
 
-      {dep?.status === "running" && (
+      {(dep?.status === "completed" || dep?.status === "running") && (
         <Card className="mt-6">
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base">Security scans</CardTitle>
@@ -92,20 +101,23 @@ export default function DeploymentDetailPage() {
               Run scan
             </Button>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-2">
+            {scans?.length === 0 && (
+              <p className="text-sm text-muted-foreground">No scans yet.</p>
+            )}
             {scans?.map((s) => (
-              <div key={s.id} className="rounded border border-border p-4">
-                <p className="font-medium">Score {s.score} · Grade {s.grade}</p>
-                <ul className="mt-2 space-y-2 text-sm text-muted-foreground">
-                  {s.findings.issues.map((issue, i) => (
-                    <li key={i}>
-                      <span className="text-foreground">[{issue.severity}]</span> {issue.description}
-                      <code className="mt-1 block text-xs">{issue.remediation}</code>
-                    </li>
-                  ))}
-                  {s.findings.issues.length === 0 && <li>No issues — great job!</li>}
-                </ul>
-              </div>
+              <Link
+                key={s.id}
+                href={`/dashboard/scans/${s.id}`}
+                className="flex items-center justify-between rounded border border-border px-4 py-3 hover:bg-muted/50"
+              >
+                <span>
+                  Grade <strong>{s.grade}</strong> · Score {s.score}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {new Date(s.created_at).toLocaleString()}
+                </span>
+              </Link>
             ))}
           </CardContent>
         </Card>

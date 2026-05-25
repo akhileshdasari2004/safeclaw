@@ -82,3 +82,35 @@ async def list_scans(
             )
         )
     return out
+
+
+@router.get("/{scan_id}", response_model=ScanResponse)
+async def get_scan(
+    scan_id: uuid.UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> ScanResponse:
+    from app.models.deployment import Deployment
+
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalar_one_or_none()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    dep = await db.execute(
+        select(Deployment).where(
+            Deployment.id == scan.deployment_id,
+            Deployment.user_id == user.id,
+        )
+    )
+    if not dep.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    return ScanResponse(
+        id=scan.id,
+        deployment_id=scan.deployment_id,
+        score=scan.score,
+        grade=scan.grade,
+        findings=ScanResultSchema(**scan.findings_json),
+        created_at=scan.created_at,
+    )

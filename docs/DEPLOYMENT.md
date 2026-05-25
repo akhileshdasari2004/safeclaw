@@ -100,6 +100,26 @@
 
 Example: 10 customers × 1 CX22 server ≈ **$65/mo infra** + platform fees.
 
+### Per-user infra (typical)
+
+| Component | Est. cost/user/mo |
+|-----------|-------------------|
+| 1× Hetzner CX22 | ~$6.49 |
+| 1× DO Basic 2GB | ~$12.00 |
+| SafeClaw platform share (amortized) | ~$2–5 |
+
+---
+
+## Live deployment logs (SSE)
+
+Frontend connects to:
+
+```http
+GET /api/v1/logs/{deployment_id}/stream?token={access_token}
+```
+
+EventSource cannot send `Authorization` headers; pass the JWT as a query param over HTTPS only.
+
 ---
 
 ## Security checklist

@@ -14,7 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import get_settings
 from app.database import engine
-from app.routers import alerts, auth, billing, deploy, scans
+from app.routers import alerts, auth, billing, deploy, logs, scans
+from app.services.deployment_logs import log_broadcaster
 from app.services.alerts import poll_cost_alerts
 from app.utils.logging import configure_logging, get_logger
 
@@ -37,32 +38,56 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-_alert_task: asyncio.Task | None = None
+_scheduler = None
 
 
-async def _alerts_worker() -> None:
+def _run_alert_poll_job() -> None:
+    """APScheduler sync wrapper — runs async poll in fresh event loop."""
     from app.database import AsyncSessionLocal
 
-    while True:
-        try:
-            async with AsyncSessionLocal() as db:
-                sent = await poll_cost_alerts(db)
-                await db.commit()
-                if sent:
-                    logger.info("alerts_poll_complete", notifications=sent)
-        except Exception as e:
-            logger.exception("alerts_poll_error", error=str(e))
-        await asyncio.sleep(settings.alerts_poll_interval_seconds)
+    async def _inner() -> None:
+        async with AsyncSessionLocal() as db:
+            sent = await poll_cost_alerts(db)
+            await db.commit()
+            if sent:
+                logger.info("alerts_poll_complete", notifications=sent)
+
+    asyncio.run(_inner())
+
+
+def _start_scheduler() -> None:
+    global _scheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    _scheduler = BackgroundScheduler()
+    _scheduler.add_job(
+        _run_alert_poll_job,
+        IntervalTrigger(seconds=settings.alerts_poll_interval_seconds),
+        id="cost_alerts",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.start()
+    logger.info("alert_scheduler_started", interval_sec=settings.alerts_poll_interval_seconds)
+
+
+def _stop_scheduler() -> None:
+    global _scheduler
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _alert_task
-    _alert_task = asyncio.create_task(_alerts_worker())
+    log_broadcaster.start_cleanup()
+    _start_scheduler()
     logger.info("app_started", env=settings.app_env)
     yield
-    if _alert_task:
-        _alert_task.cancel()
+    _stop_scheduler()
+    await log_broadcaster.stop_cleanup()
     await engine.dispose()
     logger.info("app_stopped")
 
@@ -93,6 +118,7 @@ app.include_router(billing.router, prefix="/api/v1")
 app.include_router(deploy.router, prefix="/api/v1")
 app.include_router(scans.router, prefix="/api/v1")
 app.include_router(alerts.router, prefix="/api/v1")
+app.include_router(logs.router, prefix="/api/v1")
 
 
 @app.exception_handler(Exception)
@@ -108,6 +134,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/live")
+async def liveness() -> dict:
+    return {"status": "alive"}
 
 
 @app.get("/ready")

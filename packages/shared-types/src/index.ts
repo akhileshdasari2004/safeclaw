@@ -1,10 +1,13 @@
 /** Shared API contracts between frontend and backend */
 
 export type DeploymentStatus =
+  | "queued"
   | "pending"
   | "provisioning"
   | "hardening"
   | "installing"
+  | "verifying"
+  | "completed"
   | "running"
   | "failed"
   | "destroyed";
@@ -44,8 +47,9 @@ export interface DeploymentPublic {
   created_at: string;
 }
 
-export interface ScanIssue {
+export interface ScanFinding {
   severity: "critical" | "high" | "medium" | "low" | "info";
+  title: string;
   description: string;
   remediation: string;
 }
@@ -53,7 +57,16 @@ export interface ScanIssue {
 export interface ScanResult {
   score: number;
   grade: string;
-  issues: ScanIssue[];
+  findings: ScanFinding[];
+  risk_summary?: string;
+}
+
+export interface DeploymentLogEvent {
+  timestamp: string;
+  deployment_id: string;
+  level: string;
+  step: string;
+  message: string;
 }
 
 export interface AlertSettings {

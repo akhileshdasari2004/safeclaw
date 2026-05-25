@@ -1,21 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { CloudProvider } from "@safeclaw/shared-types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { DeploymentLogs } from "@/components/deploy/DeploymentLogs";
 
 type Plan = { id: string; name: string; monthly_cost_usd: number; vcpus: number; memory_gb: number };
 type Region = { id: string; name: string };
 
 const STEPS = ["Provider", "Region", "Plan", "SSH", "Review", "Deploy"];
+const STAGES = ["queued", "provisioning", "hardening", "installing", "verifying", "completed"];
 
 export default function DeployWizardPage() {
-  const router = useRouter();
   const [step, setStep] = useState(0);
   const [provider, setProvider] = useState<CloudProvider>("hetzner");
   const [region, setRegion] = useState("");
@@ -24,6 +24,7 @@ export default function DeployWizardPage() {
   const [sshPublic, setSshPublic] = useState("");
   const [sshPrivate, setSshPrivate] = useState("");
   const [deploying, setDeploying] = useState(false);
+  const [deploymentId, setDeploymentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const { data: regions } = useQuery({
@@ -48,7 +49,7 @@ export default function DeployWizardPage() {
     setDeploying(true);
     setError(null);
     try {
-      const res = await api<{ id: string }>("/api/v1/deployments", {
+      const res = await api<{ id: string; status: string }>("/api/v1/deployments", {
         method: "POST",
         body: JSON.stringify({
           provider,
@@ -60,7 +61,7 @@ export default function DeployWizardPage() {
           idempotency_key: `deploy-${serverName}-${Date.now()}`,
         }),
       });
-      router.push(`/dashboard/deployments/${res.id}`);
+      setDeploymentId(res.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Deploy failed");
       setDeploying(false);
@@ -159,9 +160,27 @@ export default function DeployWizardPage() {
             </dl>
           )}
           {step === 5 && (
-            <p className="text-muted-foreground">
-              {deploying ? "Starting provisioning…" : "Ready to deploy."}
-            </p>
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2 text-xs">
+                {STAGES.map((s) => (
+                  <span key={s} className="rounded border border-border px-2 py-1 capitalize text-muted-foreground">
+                    {s}
+                  </span>
+                ))}
+              </div>
+              {deploymentId ? (
+                <>
+                  <DeploymentLogs deploymentId={deploymentId} enabled />
+                  <Button asChild className="w-full">
+                    <a href={`/dashboard/deployments/${deploymentId}`}>Open deployment details</a>
+                  </Button>
+                </>
+              ) : (
+                <p className="text-muted-foreground">
+                  {deploying ? "Starting provisioning…" : "Ready to deploy."}
+                </p>
+              )}
+            </div>
           )}
           {error && <p className="text-sm text-red-400">{error}</p>}
           <div className="flex justify-between pt-4">

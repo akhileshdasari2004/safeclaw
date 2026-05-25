@@ -57,4 +57,22 @@ async def subscription_status(user: CurrentUser, db: AsyncSession = Depends(get_
         "status": sub.status,
         "tier": sub.tier,
         "stripe_subscription_id": sub.stripe_subscription_id,
+        "stripe_customer_id": sub.stripe_customer_id,
+        "updated_at": sub.updated_at.isoformat(),
     }
+
+
+@router.post("/portal")
+async def billing_portal(user: CurrentUser, db: AsyncSession = Depends(get_db)) -> dict:
+    from sqlalchemy import select
+    from app.models.subscription import Subscription
+
+    result = await db.execute(select(Subscription).where(Subscription.user_id == user.id))
+    sub = result.scalar_one_or_none()
+    if not sub or not sub.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No Stripe customer on file")
+    try:
+        session = stripe_service.create_portal_session(sub.stripe_customer_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"portal_url": session.url}

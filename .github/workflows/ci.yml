@@ -8,20 +8,6 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: safeclaw_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,13 +17,13 @@ jobs:
         run: |
           cd apps/backend
           pip install -r requirements.txt -r requirements-dev.txt
+      - name: Ruff lint
+        run: cd apps/backend && ruff check app tests
       - name: Run pytest
         env:
           JWT_SECRET: ci-test-jwt-secret-minimum-32-characters
           ENCRYPTION_KEY: ci-test-encryption-key-for-tests!!
-        run: |
-          cd apps/backend
-          pytest -v
+        run: cd apps/backend && pytest -v
 
   frontend:
     runs-on: ubuntu-latest
@@ -51,3 +37,4 @@ jobs:
       - run: npm run build -w @safeclaw/shared-types
       - run: npm run lint -w @safeclaw/frontend
       - run: npm run test -w @safeclaw/frontend
+      - run: npm run build -w @safeclaw/frontend

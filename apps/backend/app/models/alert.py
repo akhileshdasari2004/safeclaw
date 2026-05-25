@@ -24,6 +24,7 @@ class Alert(Base):
     )
     threshold: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    cooldown_hours: Mapped[int] = mapped_column(default=24, nullable=False)
     last_triggered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

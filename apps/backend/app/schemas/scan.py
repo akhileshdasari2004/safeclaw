@@ -2,11 +2,12 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
-class ScanIssueSchema(BaseModel):
+class ScanFindingSchema(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"]
+    title: str
     description: str
     remediation: str
 
@@ -14,7 +15,8 @@ class ScanIssueSchema(BaseModel):
 class ScanResultSchema(BaseModel):
     score: int
     grade: str
-    issues: list[ScanIssueSchema]
+    findings: list[ScanFindingSchema] = Field(default_factory=list)
+    risk_summary: str = ""
 
 
 class ScanResponse(BaseModel):

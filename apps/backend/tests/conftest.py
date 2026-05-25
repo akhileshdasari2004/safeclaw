@@ -13,6 +13,7 @@ os.environ.setdefault("ENCRYPTION_KEY", "test-encryption-key-for-unit-tests!!")
 
 from app.database import Base, get_db
 from app.main import app
+from app.models.alert_history import AlertHistory  # noqa: F401
 from app.models.user import User
 from app.utils.security import hash_password
 

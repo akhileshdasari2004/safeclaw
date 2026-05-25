@@ -51,13 +51,32 @@ def send_deployment_success_email(to: str, server_name: str, ip_address: str) ->
     _send(to, f"SafeClaw: {server_name} is live", html)
 
 
-def send_cost_alert_email(to: str, current_spend: float, threshold: float) -> None:
+def send_cost_alert_email(
+    to: str,
+    current_spend: float,
+    threshold: float,
+    *,
+    provider: str | None = None,
+    test: bool = False,
+) -> None:
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    title = "SafeClaw cost alert (test)" if test else "SafeClaw cost threshold exceeded"
     html = f"""
     <div style="font-family: system-ui, sans-serif; max-width: 560px;">
-      <h1 style="color: #dc2626;">Cost alert</h1>
-      <p>Estimated infrastructure spend is <strong>${current_spend:.2f}/mo</strong>,
-         exceeding your threshold of <strong>${threshold:.2f}</strong>.</p>
-      <p>Review deployments in your SafeClaw dashboard.</p>
+      <h1 style="color: #dc2626;">{title}</h1>
+      <table style="width:100%; border-collapse: collapse; margin: 16px 0;">
+        <tr><td style="padding:8px 0;color:#64748b;">Current spend</td>
+            <td style="padding:8px 0;"><strong>${current_spend:.2f}/mo est.</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#64748b;">Threshold</td>
+            <td style="padding:8px 0;"><strong>${threshold:.2f}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#64748b;">Provider</td>
+            <td style="padding:8px 0;">{provider or "all"}</td></tr>
+        <tr><td style="padding:8px 0;color:#64748b;">Time</td>
+            <td style="padding:8px 0;">{ts}</td></tr>
+      </table>
+      <p>Review deployments and alert settings in your SafeClaw dashboard.</p>
     </div>
     """
-    _send(to, "SafeClaw cost threshold exceeded", html)
+    _send(to, title, html)
