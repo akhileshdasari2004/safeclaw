@@ -29,8 +29,11 @@ async def trigger_scan(
         select(Deployment).where(Deployment.id == deployment_id, Deployment.user_id == user.id)
     )
     dep = dep_result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
     private_key = None
-    if dep and dep.encrypted_ssh_private_key:
+    if dep.encrypted_ssh_private_key:
         try:
             private_key = decrypt_secret(dep.encrypted_ssh_private_key)
         except ValueError:

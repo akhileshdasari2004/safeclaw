@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 from app.utils.logging import get_logger
 
@@ -28,10 +28,17 @@ class DeploymentLogEvent:
     level: str
     step: str
     message: str
+    event_id: str | None = None
+    correlation_id: str | None = None
 
     def to_sse(self, event_type: str = "log") -> str:
         payload = json.dumps(asdict(self))
-        return f"event: {event_type}\ndata: {payload}\n\n"
+        parts: list[str] = []
+        if self.event_id:
+            parts.append(f"id: {self.event_id}")
+        parts.append(f"event: {event_type}")
+        parts.append(f"data: {payload}")
+        return "\n".join(parts) + "\n\n"
 
     @classmethod
     def heartbeat(cls, deployment_id: uuid.UUID) -> DeploymentLogEvent:
@@ -50,6 +57,7 @@ class _StreamState:
     subscribers: list[asyncio.Queue[DeploymentLogEvent | None]] = field(default_factory=list)
     last_activity: float = field(default_factory=time.time)
     terminal: bool = False
+    last_event_id: str | None = None
 
 
 class DeploymentLogBroadcaster:
@@ -99,6 +107,30 @@ class DeploymentLogBroadcaster:
             state.last_activity = time.time()
             return state
 
+    async def publish_event(
+        self,
+        event: DeploymentLogEvent,
+        *,
+        terminal: bool = False,
+        skip_subscribers: bool = False,
+    ) -> DeploymentLogEvent:
+        dep_id = uuid.UUID(event.deployment_id)
+        async with self._lock:
+            state = self._streams.setdefault(dep_id, _StreamState())
+            state.history.append(event)
+            state.last_activity = time.time()
+            if event.event_id:
+                state.last_event_id = event.event_id
+            if terminal:
+                state.terminal = True
+            if not skip_subscribers:
+                for queue in list(state.subscribers):
+                    try:
+                        queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        pass
+        return event
+
     async def publish(
         self,
         deployment_id: uuid.UUID,
@@ -115,21 +147,28 @@ class DeploymentLogBroadcaster:
             step=step,
             message=message,
         )
-        async with self._lock:
-            state = self._streams.setdefault(deployment_id, _StreamState())
-            state.history.append(event)
-            state.last_activity = time.time()
-            if terminal:
-                state.terminal = True
-            for queue in list(state.subscribers):
-                try:
-                    queue.put_nowait(event)
-                except asyncio.QueueFull:
-                    pass
-        return event
+        return await self.publish_event(event, terminal=terminal)
+
+    def _history_after(
+        self, state: _StreamState, last_event_id: str | None
+    ) -> list[DeploymentLogEvent]:
+        if not last_event_id:
+            return list(state.history)
+        found = False
+        replay: list[DeploymentLogEvent] = []
+        for ev in state.history:
+            if found:
+                replay.append(ev)
+            elif ev.event_id == last_event_id:
+                found = True
+        return replay if found else list(state.history)
 
     async def subscribe(
-        self, deployment_id: uuid.UUID, *, replay: bool = True
+        self,
+        deployment_id: uuid.UUID,
+        *,
+        replay: bool = True,
+        last_event_id: str | None = None,
     ) -> AsyncIterator[DeploymentLogEvent]:
         state = await self.ensure_stream(deployment_id)
         queue: asyncio.Queue[DeploymentLogEvent | None] = asyncio.Queue(maxsize=256)
@@ -137,7 +176,7 @@ class DeploymentLogBroadcaster:
             if len(state.subscribers) >= MAX_SUBSCRIBERS_PER_DEPLOYMENT:
                 raise RuntimeError("Too many subscribers for this deployment")
             state.subscribers.append(queue)
-            history = list(state.history) if replay else []
+            history = self._history_after(state, last_event_id) if replay else []
 
         try:
             for event in history:

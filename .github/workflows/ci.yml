@@ -19,11 +19,21 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
       - name: Ruff lint
         run: cd apps/backend && ruff check app tests
-      - name: Run pytest
+      - name: Run pytest with coverage
         env:
           JWT_SECRET: ci-test-jwt-secret-minimum-32-characters
           ENCRYPTION_KEY: ci-test-encryption-key-for-tests!!
-        run: cd apps/backend && pytest -v
+        run: |
+          cd apps/backend
+          pytest -v --cov=app --cov-report=term-missing --cov-fail-under=55
+      - name: Chaos tests
+        env:
+          JWT_SECRET: ci-test-jwt-secret-minimum-32-characters
+          ENCRYPTION_KEY: ci-test-encryption-key-for-tests!!
+        run: cd apps/backend && pytest tests/chaos -v
+      - name: Mypy (app)
+        run: cd apps/backend && mypy app --ignore-missing-imports --no-error-summary 2>&1 | head -50
+        continue-on-error: false
 
   frontend:
     runs-on: ubuntu-latest

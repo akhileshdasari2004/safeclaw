@@ -10,11 +10,11 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from starlette.middleware.base import BaseHTTPMiddleware
-
 from app.config import get_settings
+from app.middleware.structured_logging import StructuredLoggingMiddleware
 from app.database import engine
-from app.routers import alerts, auth, billing, deploy, logs, scans
+from app.routers import alerts, auth, billing, deploy, deployment_events, incidents, logs, ops, scans
+from app.metrics.collector import metrics
 from app.services.deployment_logs import log_broadcaster
 from app.services.alerts import poll_cost_alerts
 from app.utils.logging import configure_logging, get_logger
@@ -26,18 +26,6 @@ logger = get_logger(__name__)
 limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_limit_per_minute}/minute"])
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        return response
-
-
 _scheduler = None
 
 
@@ -47,8 +35,13 @@ def _run_alert_poll_job() -> None:
 
     async def _inner() -> None:
         async with AsyncSessionLocal() as db:
+            from app.services.job_orchestrator import run_scheduled_maintenance
+
+            summary = await run_scheduled_maintenance(db)
             sent = await poll_cost_alerts(db)
             await db.commit()
+            if summary.get("orphans_recovered"):
+                logger.info("orphan_recovery_complete", count=summary["orphans_recovered"])
             if sent:
                 logger.info("alerts_poll_complete", notifications=sent)
 
@@ -104,7 +97,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-app.add_middleware(RequestIDMiddleware)
+app.add_middleware(StructuredLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -115,10 +108,13 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(billing.router, prefix="/api/v1")
+app.include_router(deployment_events.router, prefix="/api/v1")
 app.include_router(deploy.router, prefix="/api/v1")
 app.include_router(scans.router, prefix="/api/v1")
 app.include_router(alerts.router, prefix="/api/v1")
 app.include_router(logs.router, prefix="/api/v1")
+app.include_router(ops.router, prefix="/api/v1")
+app.include_router(incidents.router, prefix="/api/v1")
 
 
 @app.exception_handler(Exception)
@@ -134,6 +130,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def prometheus_style_metrics() -> dict:
+    """Operational metrics snapshot (JSON)."""
+    return metrics.snapshot()
 
 
 @app.get("/live")

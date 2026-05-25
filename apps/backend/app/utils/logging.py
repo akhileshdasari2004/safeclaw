@@ -35,3 +35,19 @@ def configure_logging(app_env: str = "development") -> None:
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
+
+
+def bind_deployment_context(
+    deployment_id: str | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Bind deployment/correlation IDs for structured logs in workers."""
+    import structlog
+
+    ctx: dict[str, str] = {}
+    if deployment_id:
+        ctx["deployment_id"] = deployment_id
+    if correlation_id:
+        ctx["correlation_id"] = correlation_id
+    if ctx:
+        structlog.contextvars.bind_contextvars(**ctx)

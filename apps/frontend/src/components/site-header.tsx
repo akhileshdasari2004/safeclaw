@@ -25,9 +25,17 @@ export function SiteHeader() {
             Pricing
           </Link>
           {authed && (
-            <Link href="/dashboard" className={pathname.startsWith("/dashboard") ? "text-primary" : "text-muted-foreground hover:text-foreground"}>
-              Dashboard
-            </Link>
+            <>
+              <Link href="/dashboard" className={pathname === "/dashboard" ? "text-primary" : "text-muted-foreground hover:text-foreground"}>
+                Dashboard
+              </Link>
+              <Link href="/dashboard/getting-started" className={pathname === "/dashboard/getting-started" ? "text-primary" : "text-muted-foreground hover:text-foreground"}>
+                Guide
+              </Link>
+              <Link href="/dashboard/analytics" className={pathname === "/dashboard/analytics" ? "text-primary" : "text-muted-foreground hover:text-foreground"}>
+                Analytics
+              </Link>
+            </>
           )}
         </nav>
         <div className="flex items-center gap-2">

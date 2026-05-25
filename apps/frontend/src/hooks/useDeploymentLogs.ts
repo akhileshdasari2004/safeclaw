@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getToken } from "@/lib/api";
 
 export type DeploymentLogEvent = {
+  event_id?: string;
+  correlation_id?: string;
   timestamp: string;
   deployment_id: string;
   level: string;
@@ -21,6 +23,7 @@ export function useDeploymentLogs(deploymentId: string | undefined, enabled = tr
   const [error, setError] = useState<string | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
   const retriesRef = useRef(0);
+  const lastEventIdRef = useRef<string | null>(null);
 
   const connect = useCallback(() => {
     if (!deploymentId || !enabled) return;
@@ -48,7 +51,12 @@ export function useDeploymentLogs(deploymentId: string | undefined, enabled = tr
       try {
         const data = JSON.parse(ev.data) as DeploymentLogEvent;
         if (data.step === "heartbeat") return;
-        setLogs((prev) => [...prev, data]);
+        const id = ev.lastEventId || data.event_id;
+        if (id) lastEventIdRef.current = id;
+        setLogs((prev) => {
+          if (id && prev.some((l) => l.event_id === id)) return prev;
+          return [...prev, { ...data, event_id: id ?? data.event_id }];
+        });
       } catch {
         /* ignore malformed */
       }

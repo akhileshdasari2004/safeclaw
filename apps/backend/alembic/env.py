@@ -18,6 +18,7 @@ from app.models import (  # noqa: F401 — register models
     User,
 )
 from app.models.audit_log import AuditLog  # noqa: F401
+from app.models.deployment_event import DeploymentEvent  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

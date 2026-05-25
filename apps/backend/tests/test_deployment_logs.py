@@ -1,6 +1,6 @@
 import uuid
 
-import pytest
+import pytest  # noqa: I001
 
 from app.services.deployment_logs import DeploymentLogBroadcaster
 
@@ -10,8 +10,10 @@ async def test_broadcaster_publish_and_subscribe():
     broadcaster = DeploymentLogBroadcaster()
     dep_id = uuid.uuid4()
 
-    await broadcaster.publish(dep_id, step="creating_server", message="Starting")
-    await broadcaster.publish(dep_id, step="completed", message="Done", terminal=True)
+    ev1 = await broadcaster.publish(dep_id, step="creating_server", message="Starting")
+    ev1.event_id = str(uuid.uuid4())
+    ev2 = await broadcaster.publish(dep_id, step="completed", message="Done", terminal=True)
+    ev2.event_id = str(uuid.uuid4())
     await broadcaster.close_stream(dep_id, step="completed", message="closed")
 
     events = []

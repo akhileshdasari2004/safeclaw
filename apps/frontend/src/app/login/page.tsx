@@ -32,7 +32,8 @@ export default function LoginPage() {
         body: JSON.stringify(body),
       });
       setToken(res.access_token);
-      router.push("/dashboard");
+      const isNew = mode === "register";
+      router.push(isNew ? "/dashboard/getting-started" : "/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Auth failed");
     } finally {

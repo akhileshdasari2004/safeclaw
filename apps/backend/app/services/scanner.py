@@ -104,6 +104,62 @@ def _run_checks(ip: str, private_key_pem: str | None) -> dict:
                 "medium",
                 ("ok",),
             ),
+            (
+                "test -S /var/run/docker.sock && stat -c '%a' /var/run/docker.sock 2>/dev/null || echo missing",
+                "Docker socket world-accessible",
+                "Docker API socket permissions may allow privilege escalation.",
+                "critical",
+                ("660", "600"),
+            ),
+            (
+                "find /etc /root -maxdepth 2 -type f -perm -0002 2>/dev/null | head -1",
+                "World-writable system files",
+                "World-writable files under /etc or /root were detected.",
+                "high",
+                ("",),
+            ),
+            (
+                "sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 1",
+                "IP forwarding enabled",
+                "IP forwarding can expose internal networks.",
+                "medium",
+                ("0",),
+            ),
+            (
+                "grep -hE '^Protocol' /etc/ssh/sshd_config 2>/dev/null | tail -1",
+                "SSH protocol not restricted",
+                "SSH should use Protocol 2 only.",
+                "medium",
+                ("protocol 2",),
+            ),
+            (
+                "ss -tlnH 2>/dev/null | grep -E ':18789\\s' | grep -v '127.0.0.1:18789' | head -1",
+                "OpenClaw exposed on public interface",
+                "OpenClaw port may be listening on all interfaces.",
+                "high",
+                ("",),
+            ),
+            (
+                "docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -i openclaw | grep '0.0.0.0' | head -1",
+                "OpenClaw container bound to 0.0.0.0",
+                "Container publishes ports on all interfaces.",
+                "critical",
+                ("",),
+            ),
+            (
+                "grep -E '^\\s*PASSWD.*:x:' /etc/passwd | awk -F: '$2==\"\" {print}' | head -1",
+                "Accounts with empty passwords",
+                "Local accounts without password hashes detected.",
+                "critical",
+                ("",),
+            ),
+            (
+                "aa-status 2>/dev/null | head -1 || apparmor_status 2>/dev/null | head -1 || echo none",
+                "AppArmor not available",
+                "Mandatory access control (AppArmor) is not active.",
+                "low",
+                ("apparmor", "profiles are in enforce", "enforce"),
+            ),
         ]
 
         for cmd, title, desc, severity, expect in checks:
@@ -120,6 +176,22 @@ def _run_checks(ip: str, private_key_pem: str | None) -> dict:
                     ok = ok and _parse_grep_value(out, expect)
                 elif "unattended" in cmd.lower():
                     ok = ok and "ok" in out.lower()
+                elif "docker.sock" in cmd:
+                    mode = out.strip().split()[-1] if out.strip() else ""
+                    ok = mode in expect or mode == "missing"
+                elif "world-writable" in title.lower():
+                    ok = code != 0 or not out.strip()
+                elif "IP forwarding" in title:
+                    ok = out.strip() == "0"
+                elif "SSH protocol" in title:
+                    ok = ok and _parse_grep_value(out, expect)
+                elif "OpenClaw exposed" in title or "0.0.0.0" in title:
+                    ok = code != 0 or not out.strip()
+                elif "empty passwords" in title.lower():
+                    ok = code != 0 or not out.strip()
+                elif "AppArmor" in title:
+                    low = out.lower()
+                    ok = any(e in low for e in expect) and "none" not in low
             if not ok:
                 remediation = {
                     "UFW firewall disabled": "sudo ufw default deny incoming && sudo ufw allow 22/tcp && sudo ufw enable",

@@ -12,14 +12,24 @@ pytest -v
 ### Coverage areas
 
 - Auth register/login
-- Health / readiness
-- Deployment log broadcaster
-- SSE endpoint auth
-- Provider catalog mocks
+- Health / readiness / metrics
+- Deployment events, timeline, SSE replay
+- Integration deployment pipeline (`tests/integration/deployment/`)
+- Billing snapshots (`tests/billing/`)
+- Job orchestrator + recovery
+- Chaos failure re-exports (`tests/chaos/`)
+- Multi-tenant authorization (`tests/test_authorization.py`)
+- Provision jobs, incidents, SSH rotation, ops analytics
+- Chaos suite (`tests/chaos/`)
 
 ### Mocks
 
-`tests/mocks/providers.py` — use `MockProvider` to patch `get_provider` in provisioning tests.
+- `tests/mocks/providers.py` — `MockProvider`, `TimeoutProvider`, `RateLimitProvider`
+- `tests/mocks/ssh.py` — `MockSSHClient`, `set_ssh_config()` for failure injection
+
+```bash
+pytest -v --cov=app --cov-fail-under=55
+```
 
 ## Frontend
 

@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Bell } from "lucide-react";
 
 type Alert = {
   id: string;
@@ -112,6 +114,17 @@ export default function AlertsPage() {
 
       <h2 className="mt-10 text-lg font-semibold">Active alerts</h2>
       {isLoading && <Skeleton className="mt-4 h-20 w-full" />}
+      {!isLoading && alerts?.length === 0 && (
+        <div className="mt-4">
+          <EmptyState
+            icon={Bell}
+            title="No cost alerts configured"
+            description="Set a monthly spend threshold and we'll email you when your infrastructure costs exceed it (with cooldown to avoid spam)."
+            actionLabel="Create alert above"
+            onAction={() => document.querySelector<HTMLInputElement>('input[type="number"]')?.focus()}
+          />
+        </div>
+      )}
       <ul className="mt-4 space-y-2">
         {alerts?.map((a) => (
           <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-border px-4 py-3 text-sm">
@@ -131,8 +144,10 @@ export default function AlertsPage() {
       </ul>
 
       <h2 className="mt-10 text-lg font-semibold">Alert history</h2>
+      {!history?.length && (
+        <p className="mt-4 text-sm text-muted-foreground">No alerts triggered yet — you&apos;re under budget.</p>
+      )}
       <ul className="mt-4 space-y-2 text-sm text-muted-foreground">
-        {history?.length === 0 && <li>No alerts triggered yet.</li>}
         {history?.map((h) => (
           <li key={h.id} className="rounded border border-border px-3 py-2">
             {h.message} · {new Date(h.created_at).toLocaleString()}

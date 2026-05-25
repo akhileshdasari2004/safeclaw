@@ -62,11 +62,24 @@ export interface ScanResult {
 }
 
 export interface DeploymentLogEvent {
+  event_id?: string;
+  correlation_id?: string;
   timestamp: string;
   deployment_id: string;
   level: string;
   step: string;
   message: string;
+}
+
+export interface DeploymentEventRecord {
+  id: string;
+  deployment_id: string;
+  correlation_id: string;
+  timestamp: string;
+  level: string;
+  step: string;
+  message: string;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface AlertSettings {

@@ -10,6 +10,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
+    from app.models.deployment_event import DeploymentEvent
+    from app.models.incident_event import IncidentEvent
+    from app.models.provision_job import ProvisionJob
     from app.models.scan import Scan
     from app.models.user import User
 
@@ -35,6 +38,11 @@ class Deployment(Base):
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    provision_state: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)
+    retry_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    ssh_key_version: Mapped[int] = mapped_column(default=1, nullable=False)
+    ssh_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -44,3 +52,9 @@ class Deployment(Base):
 
     user: Mapped["User"] = relationship(back_populates="deployments")
     scans: Mapped[list["Scan"]] = relationship(back_populates="deployment")
+    events: Mapped[list["DeploymentEvent"]] = relationship(
+        back_populates="deployment",
+        order_by="DeploymentEvent.timestamp",
+    )
+    provision_jobs: Mapped[list["ProvisionJob"]] = relationship(back_populates="deployment")
+    incidents: Mapped[list["IncidentEvent"]] = relationship(back_populates="deployment")

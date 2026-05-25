@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { DeploymentLogs } from "@/components/deploy/DeploymentLogs";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Cloud } from "lucide-react";
+import { markOnboardingComplete } from "@/lib/onboarding";
 
 type Plan = { id: string; name: string; monthly_cost_usd: number; vcpus: number; memory_gb: number };
 type Region = { id: string; name: string };
@@ -62,6 +65,7 @@ export default function DeployWizardPage() {
         }),
       });
       setDeploymentId(res.id);
+      markOnboardingComplete();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Deploy failed");
       setDeploying(false);
@@ -101,6 +105,15 @@ export default function DeployWizardPage() {
                 </Button>
               ))}
             </div>
+          )}
+          {step === 1 && regions?.regions.length === 0 && (
+            <EmptyState
+              icon={Cloud}
+              title="No regions available"
+              description="Check your API token for this provider in backend .env, then refresh."
+              actionLabel="Change provider"
+              onAction={() => setStep(0)}
+            />
           )}
           {step === 1 && (
             <div className="grid gap-2">

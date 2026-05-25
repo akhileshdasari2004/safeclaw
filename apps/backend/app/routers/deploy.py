@@ -17,8 +17,11 @@ from app.schemas.deploy import (
     ProviderPlansResponse,
     ProviderRegionsResponse,
     RegionItem,
+    RotateSshRequest,
 )
-from app.services.provision import run_provision
+from app.services.deployment_recovery import rollback_deployment
+from app.services.provision_jobs import JOB_PROVISION, JOB_RESUME, enqueue_provision_job, execute_provision_job
+from app.services.ssh_rotation import rotate_deployment_ssh_keys
 from app.utils.audit import log_audit
 from app.utils.security import encrypt_secret
 
@@ -106,12 +109,14 @@ async def create_deployment(
         server_name=body.server_name,
         plan_id=body.plan_id,
         status="queued",
+        provision_state="QUEUED",
         idempotency_key=body.idempotency_key,
         logs=f"SSH_PUBLIC_KEY:{body.ssh_public_key}\n",
     )
     db.add(deployment)
     await db.flush()
 
+    request_id = getattr(request.state, "request_id", None)
     await log_audit(
         db,
         "deployment.created",
@@ -119,24 +124,24 @@ async def create_deployment(
         resource_type="deployment",
         resource_id=str(deployment.id),
         ip_address=request.client.host if request.client else None,
+        request_id=request_id,
     )
 
     private_key = body.ssh_private_key
     if private_key:
         deployment.encrypted_ssh_private_key = encrypt_secret(private_key)
 
+    job = await enqueue_provision_job(db, deployment.id, JOB_PROVISION)
+
     async def _provision_task() -> None:
         from app.database import AsyncSessionLocal
+        from app.models.provision_job import ProvisionJob
 
         async with AsyncSessionLocal() as session:
             try:
-                pk = None
-                if private_key:
-                    pk = private_key
-                elif deployment.encrypted_ssh_private_key:
-                    from app.utils.security import decrypt_secret
-                    pk = decrypt_secret(deployment.encrypted_ssh_private_key)
-                await run_provision(session, deployment.id, pk)
+                j = await session.get(ProvisionJob, job.id)
+                if j:
+                    await execute_provision_job(session, j)
                 await session.commit()
             except Exception:
                 await session.rollback()
@@ -159,25 +164,110 @@ async def retry_deployment(
     dep = result.scalar_one_or_none()
     if not dep:
         raise HTTPException(status_code=404, detail="Deployment not found")
-    if dep.status not in ("failed", "pending", "queued"):
+    if dep.provision_state not in ("FAILED", "QUEUED", "ROLLED_BACK") and dep.status not in (
+        "failed",
+        "queued",
+        "pending",
+    ):
         raise HTTPException(status_code=400, detail="Only failed deployments can be retried")
 
-    dep.status = "queued"
-    dep.error_message = None
+    job = await enqueue_provision_job(db, dep.id, JOB_RESUME)
 
     async def _retry() -> None:
         from app.database import AsyncSessionLocal
-        from app.utils.security import decrypt_secret
+        from app.models.provision_job import ProvisionJob
 
         async with AsyncSessionLocal() as session:
-            pk = None
-            if dep.encrypted_ssh_private_key:
-                pk = decrypt_secret(dep.encrypted_ssh_private_key)
             try:
-                await run_provision(session, dep.id, pk)
+                j = await session.get(ProvisionJob, job.id)
+                if j:
+                    await execute_provision_job(session, j)
                 await session.commit()
             except Exception:
                 await session.rollback()
 
     background_tasks.add_task(_retry)
     return dep
+
+
+@router.post("/{deployment_id}/resume", response_model=DeployResponse)
+async def resume_deployment_endpoint(
+    deployment_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser,
+    license_row: License = Depends(require_active_license),
+    db: AsyncSession = Depends(get_db),
+) -> Deployment:
+    result = await db.execute(
+        select(Deployment).where(Deployment.id == deployment_id, Deployment.user_id == user.id)
+    )
+    dep = result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    job = await enqueue_provision_job(db, dep.id, JOB_RESUME)
+
+    async def _task() -> None:
+        from app.database import AsyncSessionLocal
+        from app.models.provision_job import ProvisionJob
+
+        async with AsyncSessionLocal() as session:
+            try:
+                j = await session.get(ProvisionJob, job.id)
+                if j:
+                    await execute_provision_job(session, j)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+
+    background_tasks.add_task(_task)
+    return dep
+
+
+@router.post("/{deployment_id}/rollback", response_model=DeployResponse)
+async def rollback_deployment_endpoint(
+    deployment_id: uuid.UUID,
+    user: CurrentUser,
+    license_row: License = Depends(require_active_license),
+    db: AsyncSession = Depends(get_db),
+) -> Deployment:
+    result = await db.execute(
+        select(Deployment).where(Deployment.id == deployment_id, Deployment.user_id == user.id)
+    )
+    dep = result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    try:
+        return await rollback_deployment(db, dep.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/{deployment_id}/rotate-ssh", response_model=DeployResponse)
+async def rotate_ssh_keys(
+    deployment_id: uuid.UUID,
+    body: RotateSshRequest,
+    request: Request,
+    user: CurrentUser,
+    license_row: License = Depends(require_active_license),
+    db: AsyncSession = Depends(get_db),
+) -> Deployment:
+    result = await db.execute(
+        select(Deployment).where(Deployment.id == deployment_id, Deployment.user_id == user.id)
+    )
+    dep = result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    dep.encrypted_ssh_private_key = encrypt_secret(body.new_private_key)
+    try:
+        return await rotate_deployment_ssh_keys(
+            db,
+            dep,
+            body.new_public_key,
+            body.new_private_key,
+            request_id=getattr(request.state, "request_id", None),
+            user_id=user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

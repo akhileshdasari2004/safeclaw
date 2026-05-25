@@ -14,6 +14,12 @@ os.environ.setdefault("ENCRYPTION_KEY", "test-encryption-key-for-unit-tests!!")
 from app.database import Base, get_db
 from app.main import app
 from app.models.alert_history import AlertHistory  # noqa: F401
+from app.models.audit_event import AuditEvent  # noqa: F401
+from app.models.billing_snapshot import BillingSnapshot  # noqa: F401
+from app.models.deployment_event import DeploymentEvent  # noqa: F401
+from app.models.incident_event import IncidentEvent  # noqa: F401
+from app.models.provision_job import ProvisionJob  # noqa: F401
+from app.models.license import License
 from app.models.user import User
 from app.utils.security import hash_password
 
@@ -49,9 +55,32 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 async def test_user(db_session: AsyncSession) -> User:
     user = User(id=uuid.uuid4(), email="test@example.com", hashed_password=hash_password("password123"))
     db_session.add(user)
+    lic = License(user_id=user.id, key="SC-TEST-TEST-TEST-TEST", tier="pro", active=True)
+    db_session.add(lic)
     await db_session.commit()
     await db_session.refresh(user)
     return user
+
+
+@pytest_asyncio.fixture
+async def deployment_row(db_session: AsyncSession, test_user: User):
+    from app.models.deployment import Deployment
+    from app.services import deployment_states as st
+
+    dep = Deployment(
+        id=uuid.uuid4(),
+        user_id=test_user.id,
+        provider="hetzner",
+        region="fsn1",
+        server_name="integration-test",
+        plan_id="cx22",
+        status="queued",
+        provision_state=st.QUEUED,
+        logs="SSH_PUBLIC_KEY:ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7test mock-key safeclaw@example.com\n",
+    )
+    db_session.add(dep)
+    await db_session.flush()
+    return dep
 
 
 @pytest_asyncio.fixture
